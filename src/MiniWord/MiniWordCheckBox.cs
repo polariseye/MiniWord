@@ -7,7 +7,7 @@
     using System.Threading.Tasks;
 
     // 参考文档: https://stackoverflow.com/questions/47098818/programmatically-add-checkbox-content-controls-to-word-document-using-openxml
-    internal class MiniWordCheckBox
+    public class MiniWordCheckBox
     {
         public bool Checked { get; set; }
 
