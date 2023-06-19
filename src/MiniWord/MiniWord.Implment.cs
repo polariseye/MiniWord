@@ -1,4 +1,4 @@
-namespace MiniSoftware
+﻿namespace MiniSoftware
 {
     using DocumentFormat.OpenXml;
     using DocumentFormat.OpenXml.Packaging;
@@ -29,12 +29,10 @@ namespace MiniSoftware
                 ms.Position = 0;
                 using (var docx = WordprocessingDocument.Open(ms, true))
                 {
-                    var hc = docx.MainDocumentPart.HeaderParts.Count();
-                    var fc = docx.MainDocumentPart.FooterParts.Count();
-                    for (int i = 0; i < hc; i++)
-                        docx.MainDocumentPart.HeaderParts.ElementAt(i).Header.Generate(docx, value);
-                    for (int i = 0; i < fc; i++)
-                        docx.MainDocumentPart.FooterParts.ElementAt(i).Footer.Generate(docx, value);
+                    foreach (var hdr in docx.MainDocumentPart.HeaderParts)
+                        hdr.Header.Generate(docx, value);
+                    foreach (var ftr in docx.MainDocumentPart.FooterParts)
+                        ftr.Footer.Generate(docx, value);
                     docx.MainDocumentPart.Document.Body.Generate(docx, value);
                     docx.Save();
                 }
@@ -47,7 +45,7 @@ namespace MiniSoftware
             // avoid {{tag}} like <t>{</t><t>{</t> 
             //AvoidSplitTagText(xmlElement);
             // avoid {{tag}} like <t>aa{</t><t>{</t>  test in...
-            AvoidSplitTagText(xmlElement);
+            AvoidSplitTagText(xmlElement, GetReplaceKeys(tags));
 
             //Tables
             var tables = xmlElement.Descendants<Table>().ToArray();
@@ -58,15 +56,16 @@ namespace MiniSoftware
 
                     foreach (var tr in trs)
                     {
+
                         var matchs = (Regex.Matches(tr.InnerText, "(?<={{).*?\\..*?(?=}})")
                             .Cast<Match>().GroupBy(x => x.Value).Select(varGroup => varGroup.First().Value)).ToArray();
                         if (matchs.Length > 0)
                         {
                             var listKeys = matchs.Select(s => s.Split('.')[0]).Distinct().ToArray();
                             // TODO:
-                            // not support > 2 list in same tr
-                            if (listKeys.Length > 2)
-                                throw new NotSupportedException("MiniWord doesn't support more than 2 list in same row");
+                            // not support > 1 list in same tr
+                            if (listKeys.Length > 1)
+                                throw new NotSupportedException("MiniWord doesn't support more than 1 list in same row");
                             var listKey = listKeys[0];
                             if (tags.ContainsKey(listKey) && tags[listKey] is IEnumerable)
                             {
@@ -84,8 +83,6 @@ namespace MiniSoftware
                                         dic.Add(dicKey, e.Value);
                                     }
 
-                                    ReplaceStatements(newTr, tags: dic);
-
                                     ReplaceText(newTr, docx, tags: dic);
                                     table.Append(newTr);
                                 }
@@ -96,8 +93,6 @@ namespace MiniSoftware
                 }
             }
 
-            ReplaceStatements(xmlElement, tags);
-
             ReplaceText(xmlElement, docx, tags);
         }
 
@@ -107,7 +102,6 @@ namespace MiniSoftware
             var pool = new List<Text>();
             var sb = new StringBuilder();
             var needAppend = false;
-            var foreachIncluded = false;
             foreach (var text in texts)
             {
                 var clear = false;
@@ -125,12 +119,9 @@ namespace MiniSoftware
                                            // TODO: record tag text if without tag then system need to clear them
                                            // TODO: every {{tag}} one <t>for them</t> and add text before first text and copy first one and remove {{, tagname, }}
 
-                    if (s.StartsWith("{{foreach"))
-                        foreachIncluded = true;
-
                     if (!s.StartsWith("{{"))
                         clear = true;
-                    else if (s.Contains("{{") && s.Contains("}}") && !foreachIncluded)
+                    else if (s.Contains("{{") && s.Contains("}}"))
                     {
                         if (sb.Length <= 1000) // avoid too big tag
                         {
@@ -145,23 +136,6 @@ namespace MiniSoftware
                         }
                         clear = true;
                     }
-                    else if (s.Contains("{{foreach") && s.Contains("endforeach}}") && foreachIncluded)
-                    {
-                        if (sb.Length <= 1000) // avoid too big tag
-                        {
-                            var first = pool.First();
-                            var newText = first.Clone() as Text;
-                            newText.Text = s;
-                            first.Parent.InsertBefore(newText, first);
-                            foreach (var t in pool)
-                            {
-                                t.Text = "";
-                            }
-                        }
-                        clear = true;
-                        foreachIncluded = false;
-                    }
-
                 }
 
                 if (clear)
@@ -199,9 +173,7 @@ namespace MiniSoftware
                         if (item2 is Dictionary<string, object> dic)
                         {
                             foreach (var item3 in dic.Keys)
-                            {
                                 keys.Add("{{" + item.Key + "." + item3 + "}}");
-                            }
                         }
                         break;
                     }
@@ -212,141 +184,6 @@ namespace MiniSoftware
                 }
             }
             return keys;
-        }
-
-        private static void ReplaceStatements(OpenXmlElement xmlElement, Dictionary<string, object> tags)
-        {
-            var paragraphs = xmlElement.Descendants<Paragraph>().ToList();
-
-            while (paragraphs.Any(s => s.InnerText.Contains("@if")))
-            {
-                var ifIndex = paragraphs.FindIndex(0, s => s.InnerText.Contains("@if"));
-                var endIfFinalIndex = paragraphs.FindIndex(ifIndex, s => s.InnerText.Contains("@endif"));
-
-                var statement = paragraphs[ifIndex].InnerText.Split(' ');
-
-                var tagValue = tags[statement[1]];
-                var checkStatement = statement.Length == 4 ? EvaluateStatement(tagValue, statement[2], statement[3]) : !bool.Parse(tagValue.ToString());
-
-                if (checkStatement)
-                {
-                    for (int i = ifIndex + 1; i <= endIfFinalIndex - 1; i++)
-                    {
-                        paragraphs[i].Remove();
-                    }
-                }
-
-                paragraphs[ifIndex].Remove();
-                paragraphs[endIfFinalIndex].Remove();
-
-                paragraphs = xmlElement.Descendants<Paragraph>().ToList();
-            }
-        }
-
-        private static bool EvaluateStatement(object tagValue, string comparisonOperator, string value)
-        {
-            var checkStatement = false;
-
-            switch (tagValue)
-            {
-                case double dtg when double.TryParse(value, out var doubleNumber):
-                    switch (comparisonOperator)
-                    {
-                        case "==":
-                            checkStatement = !dtg.Equals(doubleNumber);
-                            break;
-                        case "!=":
-                            checkStatement = dtg.Equals(doubleNumber);
-                            break;
-                        case ">":
-                            checkStatement = dtg <= doubleNumber;
-                            break;
-                        case "<":
-                            checkStatement = dtg >= doubleNumber;
-                            break;
-                        case ">=":
-                            checkStatement = dtg < doubleNumber;
-                            break;
-                        case "<=":
-                            checkStatement = dtg > doubleNumber;
-                            break;
-                    }
-
-                    break;
-                case int itg when int.TryParse(value, out var intNumber):
-                    switch (comparisonOperator)
-                    {
-                        case "==":
-                            checkStatement = !itg.Equals(intNumber);
-                            break;
-                        case "!=":
-                            checkStatement = itg.Equals(intNumber);
-                            break;
-                        case ">":
-                            checkStatement = itg <= intNumber;
-                            break;
-                        case "<":
-                            checkStatement = itg >= intNumber;
-                            break;
-                        case ">=":
-                            checkStatement = itg < intNumber;
-                            break;
-                        case "<=":
-                            checkStatement = itg > intNumber;
-                            break;
-                    }
-
-                    break;
-                case DateTime dttg when DateTime.TryParse(value, out var date):
-                    switch (comparisonOperator)
-                    {
-                        case "==":
-                            checkStatement = !dttg.Equals(date);
-                            break;
-                        case "!=":
-                            checkStatement = dttg.Equals(date);
-                            break;
-                        case ">":
-                            checkStatement = dttg <= date;
-                            break;
-                        case "<":
-                            checkStatement = dttg >= date;
-                            break;
-                        case ">=":
-                            checkStatement = dttg < date;
-                            break;
-                        case "<=":
-                            checkStatement = dttg > date;
-                            break;
-                    }
-
-                    break;
-                case bool btg when bool.TryParse(value, out var boolean):
-                    switch (comparisonOperator)
-                    {
-                        case "==":
-                            checkStatement = btg != boolean;
-                            break;
-                        case "!=":
-                            checkStatement = btg == boolean;
-                            break;
-                    }
-                    break;
-                case string stg:
-                    switch (comparisonOperator)
-                    {
-                        case "==":
-                            checkStatement = stg != value;
-                            break;
-                        case "!=":
-                            checkStatement = stg == value;
-                            break;
-                    }
-
-                    break;
-            }
-
-            return checkStatement;
         }
 
         private static void ReplaceText(OpenXmlElement xmlElement, WordprocessingDocument docx, Dictionary<string, object> tags)
@@ -366,19 +203,6 @@ namespace MiniSoftware
                         foreach (var tag in tags)
                         {
                             var isMatch = t.Text.Contains($"{{{{{tag.Key}}}}}");
-
-                            if (!isMatch && tag.Value is List<MiniWordForeach> forTags)
-                            {
-                                if (forTags.Any(forTag => forTag.Value.Keys.Any(dictKey =>
-                                    {
-                                        var innerTag = "{{" + tag.Key + "." + dictKey + "}}";
-                                        return t.Text.Contains(innerTag);
-                                    })))
-                                {
-                                    isMatch = true;
-                                }
-                            }
-
                             if (isMatch)
                             {
                                 if (tag.Value is string[] || tag.Value is IList<string> || tag.Value is List<string>)
@@ -397,31 +221,6 @@ namespace MiniSoftware
                                         run.Append(newT);
                                         currentT = newT;
                                     }
-                                    t.Remove();
-                                }
-                                else if (tag.Value is List<MiniWordForeach> vs)
-                                {
-                                    var currentT = t;
-                                    var generatedText = new Text();
-                                    currentT.Text = currentT.Text.Replace(@"{{foreach", "").Replace(@"endforeach}}", "");
-                                    for (var i = 0; i < vs.Count; i++)
-                                    {
-                                        var newT = t.CloneNode(true) as Text;
-
-                                        foreach (var vv in vs[i].Value)
-                                        {
-                                            newT.Text = newT.Text.Replace("{{" + tag.Key + "." + vv.Key + "}}", vv.Value.ToString());
-                                        }
-
-                                        if (i != vs.Count)
-                                        {
-                                            newT.Text += vs[i].Separator;
-                                        }
-
-                                        generatedText.Text += newT.Text;
-                                    }
-
-                                    run.Append(generatedText);
                                     t.Remove();
                                 }
                                 else if (tag.Value is MiniWordPicture)
@@ -453,11 +252,15 @@ namespace MiniSoftware
                                     AddHyperLink(docx, run, tag.Value);
                                     t.Remove();
                                 }
-                                else if (tag.Value is MiniWordColorText || tag.Value is MiniWordColorText[])
+                                else if (IsCheckbox(tag.Value))
                                 {
-                                    var colorText = tag.Value is MiniWordColorText
-                                        ? AddColorText(new[] { (MiniWordColorText)tag.Value })
-                                        : AddColorText((MiniWordColorText[])tag.Value);
+                                    AddCheckBox(docx, run, tag.Value);
+                                    t.Remove();
+                                }
+                                else if (tag.Value is MiniWordColorText)
+                                {
+                                    var miniWordColorText = (MiniWordColorText)tag.Value;
+                                    var colorText = AddColorText(miniWordColorText);
                                     run.Append(colorText);
                                     t.Remove();
                                 }
@@ -471,23 +274,6 @@ namespace MiniSoftware
                                     else
                                     {
                                         newText = tag.Value?.ToString();
-                                    }
-                                    if (newText.IsNotBlank())
-                                    {
-                                        var vs = newText.Split(new char[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
-                                        var currentT = t;
-                                        var isFirst = true;
-                                        foreach (var v in vs)
-                                        {
-                                            var newT = t.CloneNode(true) as Text;
-                                            newT.Text = t.Text.Replace($"{{{{{tag.Key}}}}}", v?.ToString());
-                                            if (isFirst)
-                                                isFirst = false;
-                                            else
-                                                run.Append(new Break());
-                                            run.Append(newT);
-                                            currentT = newT;
-                                        }
                                     }
                                     t.Text = t.Text.Replace($"{{{{{tag.Key}}}}}", newText);
                                 }
@@ -527,6 +313,12 @@ namespace MiniSoftware
                     value is IEnumerable<MiniWordHyperLink>;
         }
 
+        private static bool IsCheckbox(object value)
+        {
+            return value is MiniWordCheckBox ||
+                    value is IEnumerable<MiniWordCheckBox>;
+        }
+
         private static void AddHyperLink(WordprocessingDocument docx, Run run, object value)
         {
             List<MiniWordHyperLink> links = new List<MiniWordHyperLink>();
@@ -549,6 +341,57 @@ namespace MiniSoftware
             }
         }
 
+        private static void AddCheckBox(WordprocessingDocument docx, Run run, object value)
+        {
+            List<MiniWordCheckBox> checkBoxs = new List<MiniWordCheckBox>();
+
+            if (value is MiniWordCheckBox)
+            {
+                checkBoxs.Add((MiniWordCheckBox)value);
+            }
+            else
+            {
+                checkBoxs.AddRange((IEnumerable<MiniWordCheckBox>)value);
+            }
+
+            foreach (var linkInfo in checkBoxs)
+            {
+                var checkboxItem = GetCheckBox(linkInfo);
+                foreach(var item in checkboxItem)
+                {
+                    run.Append(item);
+                }                
+                run.Append(new Break());
+            }
+        }
+
+        private static List<Run> GetCheckBox(MiniWordCheckBox miniWordCheckbox)
+        {
+            var result = new List<Run>();
+            result.Add(new Run(
+                new FieldChar(
+                    new FormFieldData(
+                        //new FormFieldName() { Val = internalName },
+                        new Enabled(),
+                        new CalculateOnExit() { Val = OnOffValue.FromBoolean(false) },
+                        new CheckBox(
+                            miniWordCheckbox.AutoSize || miniWordCheckbox.Size <= 0 ? new AutomaticallySizeFormField()  as OpenXmlElement : new FormFieldSize() { Val = miniWordCheckbox.Size.ToString() } as OpenXmlElement,
+                            new DefaultCheckBoxFormFieldState() { Val = OnOffValue.FromBoolean(miniWordCheckbox.Checked) }))
+                )
+                {
+                    FieldCharType = FieldCharValues.Begin
+                }
+            ));
+            result.Add(new Run(new FieldCode(" FORMCHECKBOX ") { Space = SpaceProcessingModeValues.Preserve }));
+            result.Add(new Run(new FieldChar() { FieldCharType = FieldCharValues.End }));
+            if (!String.IsNullOrEmpty(miniWordCheckbox.Text))
+            {
+                result.Add(new Run(new Text(miniWordCheckbox.Text)));
+            }
+
+            return result;
+        }
+
         private static Hyperlink GetHyperLink(MainDocumentPart mainPart, MiniWordHyperLink linkInfo)
         {
             var hr = mainPart.AddHyperlinkRelationship(new Uri(linkInfo.Url), true);
@@ -565,19 +408,16 @@ namespace MiniSoftware
             };
             return xmlHyperLink;
         }
-        private static RunProperties AddColorText(MiniWordColorText[] miniWordColorTextArray)
+        private static RunProperties AddColorText(MiniWordColorText miniWordColorText)
         {
 
             RunProperties runPro = new RunProperties();
-            foreach (var miniWordColorText in miniWordColorTextArray)
-            {
-                Text text = new Text(miniWordColorText.Text);
-                Color color = new Color() { Val = miniWordColorText.FontColor?.Replace("#", "") };
-                Shading shading = new Shading() { Fill = miniWordColorText.HighlightColor?.Replace("#", "") };
-                runPro.Append(shading);
-                runPro.Append(color);
-                runPro.Append(text);
-            }
+            Text text = new Text(miniWordColorText.Text);
+            Color color = new Color() { Val = miniWordColorText.FontColor?.Replace("#", "") };
+            Shading shading = new Shading() { Fill = miniWordColorText.HighlightColor?.Replace("#", "") };
+            runPro.Append(shading);
+            runPro.Append(color);
+            runPro.Append(text);
 
             return runPro;
         }
@@ -618,7 +458,7 @@ namespace MiniSoftware
                                                  new A.BlipExtension()
                                                  {
                                                      Uri =
-                                                        $"{{{Guid.NewGuid().ToString("n")}}}"
+                                                        $"{{{ Guid.NewGuid().ToString("n")}}}"
                                                  })
                                          )
                                          {
